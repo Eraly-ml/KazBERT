@@ -19,8 +19,8 @@ os.environ["OMP_NUM_THREADS"] = "4"
 
 # Отключение повторной регистрации CUDA-функций
 os.environ["XLA_FLAGS"] = "--xla_gpu_cuda_data_dir=/usr/lib/cuda"
-torch.backends.cudnn.benchmark = True
-torch.backends.cudnn.enabled = True
+torch.backends.cudnn.benchmark = False
+torch.backends.cudnn.enabled = False
 
 # Настройки окружения для предотвращения ошибок CUDA и DDP
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -54,11 +54,6 @@ def main():
         "bert-base-multilingual-cased",
         ignore_mismatched_sizes=True
     )
-    
-    # Применяем torch.compile для оптимизации модели
-    if hasattr(torch, "compile"):
-        model = torch.compile(model)
-    
     model.to(device)
 
     # Загружаем датасет
@@ -100,7 +95,6 @@ def main():
         fp16=True,
         dataloader_num_workers=4,
         report_to="none",
-        gradient_accumulation_steps=2, 
         evaluation_strategy="no",  # Отключаем валидацию
         **({"local_rank": local_rank} if local_rank != -1 else {}),  # Передаем local_rank только если используется DDP
     )

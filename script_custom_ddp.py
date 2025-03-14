@@ -15,12 +15,13 @@ from transformers import (
 from datasets import load_dataset
 
 # Оптимизация многопоточного использования CPU
-os.environ["OMP_NUM_THREADS"] = "4"
+import multiprocessing
+os.environ["OMP_NUM_THREADS"] = str(multiprocessing.cpu_count() // 2)  # Половина ядер
 
 # Отключение повторной регистрации CUDA-функций
 os.environ["XLA_FLAGS"] = "--xla_gpu_cuda_data_dir=/usr/lib/cuda"
-torch.backends.cudnn.benchmark = False
-torch.backends.cudnn.enabled = False
+torch.backends.cudnn.benchmark = True
+torch.backends.cudnn.enabled = True
 
 # Настройки окружения для предотвращения ошибок CUDA и DDP
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -29,19 +30,20 @@ os.environ["NVIDIA_TF32_OVERRIDE"] = "0"
 
 # Логирование
 log_filename = f"training_log_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.log"
-logging.basicConfig(filename=log_filename, level=logging.INFO,
+logging.basicConfig(filename=log_filename, level=logging.INFO, 
                     format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 def main():
     # Определяем режим работы (DDP или одиночный)
     if "LOCAL_RANK" in os.environ:
-        # Если запущено в DDP, инициализируем группу
+        local_rank = int(os.environ["LOCAL_RANK"])
         torch.distributed.init_process_group(backend="nccl")
-        device = torch.device(f"cuda:{os.environ['LOCAL_RANK']}")
+        device = torch.device(f"cuda:{local_rank}")
         torch.cuda.set_device(device)
-        logger.info(f"Запущено в режиме DDP. LOCAL_RANK = {os.environ['LOCAL_RANK']}")
+        logger.info(f"Запущено в режиме DDP. LOCAL_RANK = {local_rank}")
     else:
+        local_rank = -1  # Если не DDP, local_rank должен быть -1
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         logger.info(f"Запущено в одиночном режиме на устройстве: {device}")
 
@@ -57,28 +59,38 @@ def main():
 
     # Загружаем датасет
     dataset = load_dataset("json", data_files="/kaggle/input/kaz-rus-eng-wiki/train_pretrain.json")
+    
+    # Удаляем дубликаты
+    unique_sentences = set()
+    dataset["train"] = dataset["train"].filter(lambda example: not (example["masked_sentence"] in unique_sentences or unique_sentences.add(example["masked_sentence"])))
+    
+    # Разделяем датасет на 50%
+    train_size = int(0.5 * len(dataset["train"]))
+    dataset["train"] = dataset["train"].shuffle(seed=42).select(range(train_size))
+    
+    logger.info(f"Размер нового датасета: {len(dataset['train'])}")
 
     def tokenize_function(examples):
         # Токенизируем "masked_sentence"
         inputs = tokenizer(
-            examples["masked_sentence"],
+            examples["masked_sentence"], 
             truncation=True, max_length=128, padding="max_length"
         )
         # Если в примерах присутствуют "labels", токенизируем их,
         # иначе используем input_ids как метки для вычисления loss
         if "labels" in examples:
             labels = tokenizer(
-                examples["labels"],
+                examples["labels"], 
                 truncation=True, max_length=128, padding="max_length"
             )["input_ids"]
-            inputs["labels"] = labels
+            inputs["labels"] = torch.tensor(labels)
         else:
-            inputs["labels"] = inputs["input_ids"]
+            inputs["labels"] = torch.tensor(inputs["input_ids"])
         return inputs
 
     # Токенизируем датасет
     tokenized_dataset = dataset.map(
-        tokenize_function, batched=True,
+        tokenize_function, batched=True, 
         remove_columns=dataset["train"].column_names
     )
 
@@ -86,16 +98,18 @@ def main():
     training_args = TrainingArguments(
         output_dir="./results",
         num_train_epochs=3,
-        per_device_train_batch_size=8,
-        per_device_eval_batch_size=8,
+        per_device_train_batch_size=16,  # Увеличен для T4x2 GPUs
+        per_device_eval_batch_size=16,
+        gradient_accumulation_steps=4,  # Накопление градиентов
         learning_rate=5e-5,
         logging_steps=100,
-        save_strategy="epoch",  # Сохраняем модель по окончании каждой эпохи
+        save_strategy="steps",  # Сохраняем на половине эпохи
+        save_steps=len(tokenized_dataset["train"]) // (2 * 16),
         fp16=True,
         dataloader_num_workers=4,
         report_to="none",
-        gradient_accumulation_steps=2,
-        eval_strategy="no"  # Отключаем валидацию
+        evaluation_strategy="no",  # Отключаем валидацию
+        **({"local_rank": local_rank} if local_rank != -1 else {}),  # Передаем local_rank только если используется DDP
     )
 
     # Создаем Trainer
@@ -103,7 +117,7 @@ def main():
         model=model,
         args=training_args,
         train_dataset=tokenized_dataset["train"],
-        tokenizer=tokenizer  # Пока используется, но в будущем может измениться
+        tokenizer=tokenizer,  # Пока используется, хотя устаревает
     )
 
     logger.info("Начало обучения модели")

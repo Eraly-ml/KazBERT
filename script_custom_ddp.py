@@ -17,12 +17,13 @@ from datasets import load_dataset
 os.environ["OMP_NUM_THREADS"] = "8"  # Используем больше потоков для загрузки данных
 
 # Отключение повторной регистрации CUDA-функций
+os.environ["XLA_FLAGS"] = "--xla_gpu_cuda_data_dir="
 os.environ["XLA_FLAGS"] = "--xla_gpu_cuda_data_dir=/usr/lib/cuda"
 torch.backends.cudnn.benchmark = True  # Улучшает производительность
 torch.backends.cuda.matmul.allow_tf32 = True  # TF32 ускоряет матмуль на Ampere (T4)
 torch.backends.cudnn.allow_tf32 = True
 torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = True  # Оптимизация fp16
-torch.backends.cuda.preferred_linalg_library("cublas")  # Оптимизация матриц
+torch.backends.cuda.preferred_linalg_library("default")  # Оптимизация матриц
 
 # Настройки окружения для DDP
 os.environ["TOKENIZERS_PARALLELISM"] = "false"

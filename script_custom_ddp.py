@@ -15,7 +15,7 @@ from transformers import (
 from datasets import load_dataset
 
 # Оптимизация многопоточного использования CPU
-os.environ["OMP_NUM_THREADS"] = "4"  
+os.environ["OMP_NUM_THREADS"] = "4"
 
 # Отключение повторной регистрации CUDA-функций
 os.environ["XLA_FLAGS"] = "--xla_gpu_cuda_data_dir=/usr/lib/cuda"
@@ -29,20 +29,19 @@ os.environ["NVIDIA_TF32_OVERRIDE"] = "0"
 
 # Логирование
 log_filename = f"training_log_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.log"
-logging.basicConfig(filename=log_filename, level=logging.INFO, 
+logging.basicConfig(filename=log_filename, level=logging.INFO,
                     format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 def main():
     # Определяем режим работы (DDP или одиночный)
     if "LOCAL_RANK" in os.environ:
-        local_rank = int(os.environ["LOCAL_RANK"])
+        # Если запущено в DDP, инициализируем группу
         torch.distributed.init_process_group(backend="nccl")
-        device = torch.device(f"cuda:{local_rank}")
+        device = torch.device(f"cuda:{os.environ['LOCAL_RANK']}")
         torch.cuda.set_device(device)
-        logger.info(f"Запущено в режиме DDP. LOCAL_RANK = {local_rank}")
+        logger.info(f"Запущено в режиме DDP. LOCAL_RANK = {os.environ['LOCAL_RANK']}")
     else:
-        local_rank = -1  # Если не DDP, local_rank должен быть -1
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         logger.info(f"Запущено в одиночном режиме на устройстве: {device}")
 
@@ -62,24 +61,24 @@ def main():
     def tokenize_function(examples):
         # Токенизируем "masked_sentence"
         inputs = tokenizer(
-            examples["masked_sentence"], 
+            examples["masked_sentence"],
             truncation=True, max_length=128, padding="max_length"
         )
         # Если в примерах присутствуют "labels", токенизируем их,
         # иначе используем input_ids как метки для вычисления loss
         if "labels" in examples:
             labels = tokenizer(
-                examples["labels"], 
+                examples["labels"],
                 truncation=True, max_length=128, padding="max_length"
             )["input_ids"]
-            inputs["labels"] = torch.tensor(labels)
+            inputs["labels"] = labels
         else:
-            inputs["labels"] = torch.tensor(inputs["input_ids"])
+            inputs["labels"] = inputs["input_ids"]
         return inputs
 
     # Токенизируем датасет
     tokenized_dataset = dataset.map(
-        tokenize_function, batched=True, 
+        tokenize_function, batched=True,
         remove_columns=dataset["train"].column_names
     )
 
@@ -91,12 +90,12 @@ def main():
         per_device_eval_batch_size=8,
         learning_rate=5e-5,
         logging_steps=100,
-        save_strategy="epoch",  # Сохраняем модель только по окончании каждой эпохи
+        save_strategy="epoch",  # Сохраняем модель по окончании каждой эпохи
         fp16=True,
         dataloader_num_workers=4,
         report_to="none",
-        evaluation_strategy="no",  # Отключаем валидацию
-        **({"local_rank": local_rank} if local_rank != -1 else {}),  # Передаем local_rank только если используется DDP
+        gradient_accumulation_steps=2,
+        eval_strategy="no"  # Отключаем валидацию
     )
 
     # Создаем Trainer
@@ -104,7 +103,7 @@ def main():
         model=model,
         args=training_args,
         train_dataset=tokenized_dataset["train"],
-        tokenizer=tokenizer,  # Пока используется, хотя устаревает
+        tokenizer=tokenizer  # Пока используется, но в будущем может измениться
     )
 
     logger.info("Начало обучения модели")

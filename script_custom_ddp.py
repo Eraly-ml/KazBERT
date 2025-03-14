@@ -49,11 +49,15 @@ def main():
 
     def tokenize_function(examples):
         inputs = tokenizer(examples["masked_sentence"], truncation=True, max_length=128, padding="max_length")
-        labels = examples.get("labels", [])  # Получаем метки, если они есть
-        inputs["labels"] = torch.tensor(labels).unsqueeze(0)  # Добавляем метки в inputs с unsqueeze
+        
+        if "labels" in examples:
+            inputs["labels"] = tokenizer(
+                examples["labels"], truncation=True, max_length=128, padding="max_length"
+            )["input_ids"]  # Теперь labels корректно токенизируются
+        
         return inputs
 
-    tokenized_dataset = dataset.map(tokenize_function, batched=True, remove_columns=dataset["train"].column_names)
+    tokenized_dataset = dataset.map(tokenize_function, batched=True, batch_size=32, remove_columns=dataset["train"].column_names)
 
     training_args = TrainingArguments(
         output_dir="./results",
@@ -87,15 +91,16 @@ def main():
         torch.distributed.destroy_process_group()
 
     # Генерация графиков бенчмарков
-    plot_benchmarks(train_result)
+    plot_benchmarks(trainer.state.log_history)
 
-def plot_benchmarks(train_result):
+def plot_benchmarks(log_history):
     sns.set(style="whitegrid")
     
-    # График изменения loss по шагам
-    steps = list(range(len(train_result.training_loss_history)))
+    losses = [log["loss"] for log in log_history if "loss" in log]
+    steps = list(range(len(losses)))
+
     plt.figure(figsize=(10, 6))
-    plt.plot(steps, train_result.training_loss_history, label="Training Loss", color="blue")
+    plt.plot(steps, losses, label="Training Loss", color="blue")
     plt.xlabel("Steps")
     plt.ylabel("Loss")
     plt.title("Training Loss over Time")

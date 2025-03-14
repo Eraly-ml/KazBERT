@@ -9,20 +9,22 @@ from transformers import (
     AutoTokenizer,
     AutoModelForMaskedLM,
     Trainer,
-    TrainingArguments,
-    AutoModelForCausalLM
+    TrainingArguments
 )
 from datasets import load_dataset
 
 # Оптимизация многопоточного использования CPU
-os.environ["OMP_NUM_THREADS"] = "4"  
+os.environ["OMP_NUM_THREADS"] = "8"  # Используем больше потоков для загрузки данных
 
 # Отключение повторной регистрации CUDA-функций
 os.environ["XLA_FLAGS"] = "--xla_gpu_cuda_data_dir=/usr/lib/cuda"
-torch.backends.cudnn.benchmark = False
-torch.backends.cudnn.enabled = False
+torch.backends.cudnn.benchmark = True  # Улучшает производительность
+torch.backends.cuda.matmul.allow_tf32 = True  # TF32 ускоряет матмуль на Ampere (T4)
+torch.backends.cudnn.allow_tf32 = True
+torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = True  # Оптимизация fp16
+torch.backends.cuda.preferred_linalg_library("cublas")  # Оптимизация матриц
 
-# Настройки окружения для предотвращения ошибок CUDA и DDP
+# Настройки окружения для DDP
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["CUDA_MODULE_LOADING"] = "LAZY"
 os.environ["NVIDIA_TF32_OVERRIDE"] = "0"
@@ -34,17 +36,11 @@ logging.basicConfig(filename=log_filename, level=logging.INFO,
 logger = logging.getLogger(__name__)
 
 def main():
-    # Определяем режим работы (DDP или одиночный)
-    if "LOCAL_RANK" in os.environ:
-        local_rank = int(os.environ["LOCAL_RANK"])
-        torch.distributed.init_process_group(backend="nccl")
-        device = torch.device(f"cuda:{local_rank}")
-        torch.cuda.set_device(device)
-        logger.info(f"Запущено в режиме DDP. LOCAL_RANK = {local_rank}")
-    else:
-        local_rank = -1  # Если не DDP, local_rank должен быть -1
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        logger.info(f"Запущено в одиночном режиме на устройстве: {device}")
+    torch.distributed.init_process_group(backend="nccl")
+    local_rank = int(os.environ["LOCAL_RANK"])
+    device = torch.device(f"cuda:{local_rank}")
+    torch.cuda.set_device(device)
+    logger.info(f"Запущено в режиме DDP. LOCAL_RANK = {local_rank}")
 
     # Используем кастомный токенизатор
     tokenizer_path = "/kaggle/input/kaz-eng-rus/pytorch/default/1"  # Укажи свой путь
@@ -54,27 +50,20 @@ def main():
         "bert-base-multilingual-cased",
         ignore_mismatched_sizes=True
     )
+    
+    # 🔥 Включаем torch.compile для ускорения
+    model = torch.compile(model, mode="max-autotune")
     model.to(device)
 
     # Загружаем датасет
     dataset = load_dataset("json", data_files="/kaggle/input/kaz-rus-eng-wiki/train_pretrain.json")
 
     def tokenize_function(examples):
-        # Токенизируем "masked_sentence"
         inputs = tokenizer(
             examples["masked_sentence"], 
             truncation=True, max_length=128, padding="max_length"
         )
-        # Если в примерах присутствуют "labels", токенизируем их,
-        # иначе используем input_ids как метки для вычисления loss
-        if "labels" in examples:
-            labels = tokenizer(
-                examples["labels"], 
-                truncation=True, max_length=128, padding="max_length"
-            )["input_ids"]
-            inputs["labels"] = torch.tensor(labels)
-        else:
-            inputs["labels"] = torch.tensor(inputs["input_ids"])
+        inputs["labels"] = torch.tensor(inputs["input_ids"])  # Masked LM loss
         return inputs
 
     # Токенизируем датасет
@@ -87,16 +76,18 @@ def main():
     training_args = TrainingArguments(
         output_dir="./results",
         num_train_epochs=3,
-        per_device_train_batch_size=8,
-        per_device_eval_batch_size=8,
+        per_device_train_batch_size=32,  # 🔥 Увеличен batch size (T4 справится)
+        per_device_eval_batch_size=32,
+        gradient_accumulation_steps=4,  # 🔥 Уменьшает VRAM usage
         learning_rate=5e-5,
         logging_steps=100,
         save_strategy="epoch",  # Сохраняем модель только по окончании каждой эпохи
-        fp16=True,
-        dataloader_num_workers=4,
+        bf16=True,  # 🔥 bf16 лучше на T4, чем fp16
+        gradient_checkpointing=True,  # 🔥 Снижает VRAM за счет пересчета градиентов
+        dataloader_num_workers=8,  # Больше потоков загрузки
         report_to="none",
         evaluation_strategy="no",  # Отключаем валидацию
-        **({"local_rank": local_rank} if local_rank != -1 else {}),  # Передаем local_rank только если используется DDP
+        ddp_find_unused_parameters=False,  # 🔥 Оптимизация DDP
     )
 
     # Создаем Trainer
@@ -111,18 +102,11 @@ def main():
     train_result = trainer.train()
     logger.info("Обучение завершено")
 
-    # Завершаем DDP, если он был инициализирован
-    if torch.distributed.is_initialized():
-        torch.distributed.destroy_process_group()
+    # Завершаем DDP
+    torch.distributed.destroy_process_group()
 
     # Генерация графиков бенчмарков
     plot_benchmarks(trainer.state.log_history)
-
-    # Загрузка модели с поддержкой генерации (если нужно)
-    model_name = "bert-base-multilingual-cased"
-    causal_model = AutoModelForCausalLM.from_pretrained(model_name)
-    causal_tokenizer = AutoTokenizer.from_pretrained(model_name)
-    print("Модель успешно загружена!")
 
 def plot_benchmarks(log_history):
     sns.set(style="whitegrid")

@@ -24,14 +24,15 @@ logging.basicConfig(filename=log_filename, level=logging.INFO, format="%(asctime
 logger = logging.getLogger(__name__)
 
 def main():
+    # Определяем режим работы (DDP или одиночный)
     if "LOCAL_RANK" in os.environ:
         local_rank = int(os.environ["LOCAL_RANK"])
         torch.distributed.init_process_group(backend="nccl")
-        device = torch.device("cuda", local_rank)
+        device = torch.device(f"cuda:{local_rank}")
         torch.cuda.set_device(device)
         logger.info(f"Запущено в режиме DDP. LOCAL_RANK = {local_rank}")
     else:
-        local_rank = 0
+        local_rank = -1  # Если не DDP, local_rank должен быть -1
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         logger.info(f"Запущено в одиночном режиме на устройстве: {device}")
 
@@ -45,20 +46,24 @@ def main():
     )
     model.to(device)
 
+    # Загружаем датасет
     dataset = load_dataset("json", data_files="/kaggle/input/kaz-rus-eng-wiki/train_pretrain.json")
 
     def tokenize_function(examples):
         inputs = tokenizer(examples["masked_sentence"], truncation=True, max_length=128, padding="max_length")
         
         if "labels" in examples:
-            inputs["labels"] = tokenizer(
+            labels = tokenizer(
                 examples["labels"], truncation=True, max_length=128, padding="max_length"
-            )["input_ids"]  # Теперь labels корректно токенизируются
+            )["input_ids"]
+            inputs["labels"] = torch.tensor(labels)  # Превращаем в тензор
         
         return inputs
 
-    tokenized_dataset = dataset.map(tokenize_function, batched=True, batch_size=32, remove_columns=dataset["train"].column_names)
+    # Токенизируем датасет
+    tokenized_dataset = dataset.map(tokenize_function, batched=True, remove_columns=dataset["train"].column_names)
 
+    # Параметры обучения
     training_args = TrainingArguments(
         output_dir="./results",
         num_train_epochs=3,
@@ -66,19 +71,19 @@ def main():
         per_device_eval_batch_size=8,
         learning_rate=5e-5,
         logging_steps=100,
-        evaluation_strategy="epoch",  # Заменено с "steps" на "epoch"
         save_steps=500,
         fp16=True,
-        local_rank=local_rank,
         dataloader_num_workers=4,
         report_to="none",
+        evaluation_strategy="no",  # Отключаем валидацию
+        **({"local_rank": local_rank} if local_rank != -1 else {}),  # local_rank передаём только если DDP
     )
 
+    # Trainer
     trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=tokenized_dataset["train"],
-        eval_dataset=tokenized_dataset["train"].select(range(1000)),  # Добавлен eval_dataset
         tokenizer=tokenizer,
     )
 
@@ -86,7 +91,7 @@ def main():
     train_result = trainer.train()
     logger.info("Обучение завершено")
 
-    # Завершаем DDP
+    # Завершаем DDP, если был инициализирован
     if torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()
 

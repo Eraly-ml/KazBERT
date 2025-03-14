@@ -15,12 +15,13 @@ from transformers import (
 from datasets import load_dataset
 
 # Оптимизация многопоточного использования CPU
-os.environ["OMP_NUM_THREADS"] = "4"  
+import multiprocessing
+os.environ["OMP_NUM_THREADS"] = str(multiprocessing.cpu_count() // 2)  # Половина ядер
 
 # Отключение повторной регистрации CUDA-функций
 os.environ["XLA_FLAGS"] = "--xla_gpu_cuda_data_dir=/usr/lib/cuda"
-torch.backends.cudnn.benchmark = False
-torch.backends.cudnn.enabled = False
+torch.backends.cudnn.benchmark = True
+torch.backends.cudnn.enabled = True
 
 # Настройки окружения для предотвращения ошибок CUDA и DDP
 os.environ["TOKENIZERS_PARALLELISM"] = "false"

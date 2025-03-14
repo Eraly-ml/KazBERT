@@ -15,7 +15,7 @@ from transformers import (
 from datasets import load_dataset
 
 # Оптимизация многопоточного использования CPU
-os.environ["OMP_NUM_THREADS"] = "4"
+os.environ["OMP_NUM_THREADS"] = "4"  
 
 # Отключение повторной регистрации CUDA-функций
 os.environ["XLA_FLAGS"] = "--xla_gpu_cuda_data_dir=/usr/lib/cuda"
@@ -66,7 +66,7 @@ def main():
             truncation=True, max_length=128, padding="max_length"
         )
         # Если в примерах присутствуют "labels", токенизируем их,
-        # иначе используем input_ids как метки, чтобы модель могла вычислить loss
+        # иначе используем input_ids как метки для вычисления loss
         if "labels" in examples:
             labels = tokenizer(
                 examples["labels"], 
@@ -91,12 +91,12 @@ def main():
         per_device_eval_batch_size=8,
         learning_rate=5e-5,
         logging_steps=100,
-        save_steps=500,
+        save_strategy="epoch",  # Сохраняем модель только по окончании каждой эпохи
         fp16=True,
         dataloader_num_workers=4,
         report_to="none",
         evaluation_strategy="no",  # Отключаем валидацию
-        **({"local_rank": local_rank} if local_rank != -1 else {}),  # Передаем local_rank только если DDP используется
+        **({"local_rank": local_rank} if local_rank != -1 else {}),  # Передаем local_rank только если используется DDP
     )
 
     # Создаем Trainer
@@ -104,7 +104,7 @@ def main():
         model=model,
         args=training_args,
         train_dataset=tokenized_dataset["train"],
-        tokenizer=tokenizer,  # Параметр tokenizer пока используется (будет заменен на processing_class в будущем)
+        tokenizer=tokenizer,  # Пока используется, хотя устаревает
     )
 
     logger.info("Начало обучения модели")

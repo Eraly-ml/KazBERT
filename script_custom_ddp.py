@@ -2,6 +2,8 @@
 import os
 import torch
 import logging
+import matplotlib.pyplot as plt
+import seaborn as sns
 from datetime import datetime
 from transformers import (
     AutoTokenizer,
@@ -11,12 +13,12 @@ from transformers import (
 )
 from datasets import load_dataset
 
-# Устанавливаем переменные окружения для CUDA и предотвращения конфликтов
+# Настройки окружения для предотвращения ошибок CUDA и DDP
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["CUDA_MODULE_LOADING"] = "LAZY"
 os.environ["NVIDIA_TF32_OVERRIDE"] = "0"
 
-# Настраиваем логирование
+# Логирование
 log_filename = f"training_log_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.log"
 logging.basicConfig(filename=log_filename, level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -47,7 +49,7 @@ def main():
 
     def tokenize_function(examples):
         return tokenizer(examples["masked_sentence"], truncation=True, max_length=128, padding="max_length")
-    
+
     tokenized_dataset = dataset.map(tokenize_function, batched=True, remove_columns=dataset["train"].column_names)
 
     training_args = TrainingArguments(
@@ -57,7 +59,7 @@ def main():
         per_device_eval_batch_size=8,
         learning_rate=5e-5,
         logging_steps=100,
-        evaluation_strategy="steps",
+        evaluation_strategy="epoch",  # Заменено с "steps" на "epoch"
         save_steps=500,
         fp16=True,
         local_rank=local_rank,
@@ -69,12 +71,35 @@ def main():
         model=model,
         args=training_args,
         train_dataset=tokenized_dataset["train"],
+        eval_dataset=tokenized_dataset["train"].select(range(1000)),  # Добавлен eval_dataset
         tokenizer=tokenizer,
     )
 
     logger.info("Начало обучения модели")
-    trainer.train()
+    train_result = trainer.train()
     logger.info("Обучение завершено")
+
+    # Завершаем DDP
+    if torch.distributed.is_initialized():
+        torch.distributed.destroy_process_group()
+
+    # Генерация графиков бенчмарков
+    plot_benchmarks(train_result)
+
+def plot_benchmarks(train_result):
+    sns.set(style="whitegrid")
+    
+    # График изменения loss по шагам
+    steps = list(range(len(train_result.training_loss_history)))
+    plt.figure(figsize=(10, 6))
+    plt.plot(steps, train_result.training_loss_history, label="Training Loss", color="blue")
+    plt.xlabel("Steps")
+    plt.ylabel("Loss")
+    plt.title("Training Loss over Time")
+    plt.legend()
+    plt.savefig("training_loss.png")
+
+    logger.info("График потерь сохранен как training_loss.png")
 
 if __name__ == "__main__":
     main()

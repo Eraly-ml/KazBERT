@@ -50,7 +50,7 @@ def main():
     def tokenize_function(examples):
         inputs = tokenizer(examples["masked_sentence"], truncation=True, max_length=128, padding="max_length")
         labels = examples.get("labels", [])  # Получаем метки, если они есть
-        inputs["labels"] = torch.tensor(labels)  # Добавляем метки в inputs
+        inputs["labels"] = torch.tensor(labels).unsqueeze(0)  # Добавляем метки в inputs с unsqueeze
         return inputs
 
     tokenized_dataset = dataset.map(tokenize_function, batched=True, remove_columns=dataset["train"].column_names)

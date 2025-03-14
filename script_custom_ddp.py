@@ -15,7 +15,7 @@ from transformers import (
 from datasets import load_dataset
 
 # Оптимизация многопоточного использования CPU
-os.environ["OMP_NUM_THREADS"] = "4"  
+os.environ["OMP_NUM_THREADS"] = "4"
 
 # Отключение повторной регистрации CUDA-функций
 os.environ["XLA_FLAGS"] = "--xla_gpu_cuda_data_dir=/usr/lib/cuda"
@@ -61,13 +61,17 @@ def main():
 
     def tokenize_function(examples):
         # Токенизируем "masked_sentence"
-        inputs = tokenizer(examples["masked_sentence"], 
-                           truncation=True, max_length=128, padding="max_length")
+        inputs = tokenizer(
+            examples["masked_sentence"], 
+            truncation=True, max_length=128, padding="max_length"
+        )
         # Если в примерах присутствуют "labels", токенизируем их,
-        # иначе используем input_ids как метки (чтобы модель возвращала loss)
+        # иначе используем input_ids как метки, чтобы модель могла вычислить loss
         if "labels" in examples:
-            labels = tokenizer(examples["labels"], 
-                               truncation=True, max_length=128, padding="max_length")["input_ids"]
+            labels = tokenizer(
+                examples["labels"], 
+                truncation=True, max_length=128, padding="max_length"
+            )["input_ids"]
             inputs["labels"] = torch.tensor(labels)
         else:
             inputs["labels"] = torch.tensor(inputs["input_ids"])
@@ -92,7 +96,7 @@ def main():
         dataloader_num_workers=4,
         report_to="none",
         evaluation_strategy="no",  # Отключаем валидацию
-        **({"local_rank": local_rank} if local_rank != -1 else {}),  # local_rank передаём только если DDP
+        **({"local_rank": local_rank} if local_rank != -1 else {}),  # Передаем local_rank только если DDP используется
     )
 
     # Создаем Trainer
@@ -100,14 +104,14 @@ def main():
         model=model,
         args=training_args,
         train_dataset=tokenized_dataset["train"],
-        tokenizer=tokenizer,  # Замечание: параметр tokenizer устаревает, но пока используется
+        tokenizer=tokenizer,  # Параметр tokenizer пока используется (будет заменен на processing_class в будущем)
     )
 
     logger.info("Начало обучения модели")
     train_result = trainer.train()
     logger.info("Обучение завершено")
 
-    # Завершаем DDP, если был инициализирован
+    # Завершаем DDP, если он был инициализирован
     if torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()
 

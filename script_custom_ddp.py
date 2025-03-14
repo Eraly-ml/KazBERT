@@ -10,8 +10,17 @@ from transformers import (
     AutoModelForMaskedLM,
     Trainer,
     TrainingArguments,
+    AutoModelForCausalLM
 )
 from datasets import load_dataset
+
+# Оптимизация многопоточного использования CPU
+os.environ["OMP_NUM_THREADS"] = "4"  
+
+# Отключение повторной регистрации CUDA-функций
+os.environ["XLA_FLAGS"] = "--xla_gpu_cuda_data_dir=/usr/lib/cuda"
+torch.backends.cudnn.benchmark = False
+torch.backends.cudnn.enabled = False
 
 # Настройки окружения для предотвращения ошибок CUDA и DDP
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -20,7 +29,8 @@ os.environ["NVIDIA_TF32_OVERRIDE"] = "0"
 
 # Логирование
 log_filename = f"training_log_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.log"
-logging.basicConfig(filename=log_filename, level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logging.basicConfig(filename=log_filename, level=logging.INFO, 
+                    format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 def main():
@@ -50,18 +60,24 @@ def main():
     dataset = load_dataset("json", data_files="/kaggle/input/kaz-rus-eng-wiki/train_pretrain.json")
 
     def tokenize_function(examples):
-        inputs = tokenizer(examples["masked_sentence"], truncation=True, max_length=128, padding="max_length")
-        
+        # Токенизируем "masked_sentence"
+        inputs = tokenizer(examples["masked_sentence"], 
+                           truncation=True, max_length=128, padding="max_length")
+        # Если в примерах присутствуют "labels", токенизируем их,
+        # иначе используем input_ids как метки (чтобы модель возвращала loss)
         if "labels" in examples:
-            labels = tokenizer(
-                examples["labels"], truncation=True, max_length=128, padding="max_length"
-            )["input_ids"]
-            inputs["labels"] = torch.tensor(labels)  # Превращаем в тензор
-        
+            labels = tokenizer(examples["labels"], 
+                               truncation=True, max_length=128, padding="max_length")["input_ids"]
+            inputs["labels"] = torch.tensor(labels)
+        else:
+            inputs["labels"] = torch.tensor(inputs["input_ids"])
         return inputs
 
     # Токенизируем датасет
-    tokenized_dataset = dataset.map(tokenize_function, batched=True, remove_columns=dataset["train"].column_names)
+    tokenized_dataset = dataset.map(
+        tokenize_function, batched=True, 
+        remove_columns=dataset["train"].column_names
+    )
 
     # Параметры обучения
     training_args = TrainingArguments(
@@ -79,12 +95,12 @@ def main():
         **({"local_rank": local_rank} if local_rank != -1 else {}),  # local_rank передаём только если DDP
     )
 
-    # Trainer
+    # Создаем Trainer
     trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=tokenized_dataset["train"],
-        tokenizer=tokenizer,
+        tokenizer=tokenizer,  # Замечание: параметр tokenizer устаревает, но пока используется
     )
 
     logger.info("Начало обучения модели")
@@ -97,6 +113,12 @@ def main():
 
     # Генерация графиков бенчмарков
     plot_benchmarks(trainer.state.log_history)
+
+    # Загрузка модели с поддержкой генерации (если нужно)
+    model_name = "bert-base-multilingual-cased"
+    causal_model = AutoModelForCausalLM.from_pretrained(model_name)
+    causal_tokenizer = AutoTokenizer.from_pretrained(model_name)
+    print("Модель успешно загружена!")
 
 def plot_benchmarks(log_history):
     sns.set(style="whitegrid")

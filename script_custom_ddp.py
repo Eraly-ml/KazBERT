@@ -10,23 +10,26 @@ from transformers import (
     AutoModelForMaskedLM,
     Trainer,
     TrainingArguments,
-    AutoModelForCausalLM  # если нужна модель для генерации текста (например, для дальнейшего сравнения)
+    AutoModelForCausalLM
 )
-from datasets import load_dataset
-import multiprocessing
+from datasets import load_dataset  # импортируем только load_dataset
 
 # Оптимизация многопоточного использования CPU
-os.environ["OMP_NUM_THREADS"] = str(multiprocessing.cpu_count() // 2)  # Используем половину ядер
+import multiprocessing
+os.environ["OMP_NUM_THREADS"] = str(multiprocessing.cpu_count() // 2)  # половина ядер
 
-# Настройки CUDA и XLA (при необходимости)
+# Отключение повторной регистрации CUDA-функций (возможно, эти ошибки можно игнорировать)
 os.environ["XLA_FLAGS"] = "--xla_gpu_cuda_data_dir=/usr/lib/cuda"
 torch.backends.cudnn.benchmark = True
 torch.backends.cudnn.enabled = True
 
-# Настройки окружения для корректной работы DDP и токенизатора
+# Настройки окружения для предотвращения ошибок CUDA и DDP
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 os.environ["CUDA_MODULE_LOADING"] = "LAZY"
 os.environ["NVIDIA_TF32_OVERRIDE"] = "0"
+
+# (Опционально) чтобы уменьшить уровень логирования TensorFlow:
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 
 # Логирование
 log_filename = f"training_log_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.log"
@@ -35,7 +38,6 @@ logging.basicConfig(filename=log_filename, level=logging.INFO,
 logger = logging.getLogger(__name__)
 
 def main():
-    # Настройка распределённого обучения, если используется DDP
     if "LOCAL_RANK" in os.environ:
         local_rank = int(os.environ["LOCAL_RANK"])
         torch.distributed.init_process_group(backend="nccl")
@@ -47,56 +49,46 @@ def main():
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         logger.info(f"Запущено в одиночном режиме на устройстве: {device}")
 
-    # Загрузка токенизатора из указанного пути
     tokenizer_path = "/kaggle/input/kaz-eng-rus/pytorch/default/1"
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
 
-    # Загрузка модели для задачи Masked Language Modeling
     model = AutoModelForMaskedLM.from_pretrained(
         "bert-base-multilingual-cased",
         ignore_mismatched_sizes=True
     )
-    model.resize_token_embeddings(len(tokenizer))
+    model.resize_token_embeddings(len(tokenizer))  # Обновляем размер токенов
     model.to(device)
 
-    # Загрузка датасета из JSON файла
     dataset = load_dataset("json", data_files="/kaggle/input/datafortrainmodelkazbert/train_pretrain_with_labels.json")
-
-    # Удаление дубликатов по полю 'masked_sentence'
+    
+    # Удаление дубликатов в 'masked_sentence'
     unique_sentences = set()
     dataset["train"] = dataset["train"].filter(lambda example: not (example["masked_sentence"] in unique_sentences or unique_sentences.add(example["masked_sentence"])))
-
-    # Разделение на обучающую (80%) и валидационную (20%) выборки
+    
+    # Разделение на обучающую и валидационную выборки (80% для тренировки, 20% для валидации)
     dataset = dataset["train"].train_test_split(test_size=0.2, seed=42)
     logger.info(f"Размер обучающего датасета: {len(dataset['train'])}")
     logger.info(f"Размер валидационного датасета: {len(dataset['test'])}")
 
-    # Функция токенизации: входом является замаскированное предложение, метками – оригинальное предложение
     def tokenize_function(examples):
         inputs = tokenizer(
             examples["masked_sentence"],
-            truncation=True,
-            max_length=128,
-            padding="max_length"
+            truncation=True, max_length=128, padding="max_length"
         )
         # Преобразуем оригинальное предложение в последовательность токенов для меток
         labels = tokenizer(
             examples["labels"],
-            truncation=True,
-            max_length=128,
-            padding="max_length"
+            truncation=True, max_length=128, padding="max_length"
         )["input_ids"]
         inputs["labels"] = labels
         return inputs
 
-    # Применяем токенизацию ко всему датасету (удаляются исходные столбцы)
     tokenized_dataset = dataset.map(
         tokenize_function,
         batched=True,
         remove_columns=dataset["train"].column_names
     )
 
-    # Настройка аргументов тренировки
     training_args = TrainingArguments(
         output_dir="./results",
         num_train_epochs=3,
@@ -110,12 +102,11 @@ def main():
         fp16=True,
         dataloader_num_workers=4,
         report_to="none",
-        evaluation_strategy="steps",
-        eval_steps=500,
+        evaluation_strategy="steps",  # Оценка после каждого шага
+        eval_steps=500,  # каждые 500 шагов
         **({"local_rank": local_rank} if local_rank != -1 else {}),
     )
 
-    # Инициализация тренера с распределёнными данными (если имеются) и валидационным датасетом
     trainer = Trainer(
         model=model,
         args=training_args,
@@ -128,14 +119,11 @@ def main():
     trainer.train()
     logger.info("Обучение завершено")
 
-    # Если используется DDP, закрываем процессную группу
     if torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()
 
-    # Визуализация тренировки: график потерь
     plot_benchmarks(trainer.state.log_history)
-
-    # Пример загрузки модели для генерации (Causal LM) для дальнейших экспериментов
+    
     model_name = "bert-base-multilingual-cased"
     causal_model = AutoModelForCausalLM.from_pretrained(model_name)
     causal_tokenizer = AutoTokenizer.from_pretrained(model_name)

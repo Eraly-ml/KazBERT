@@ -12,7 +12,7 @@ from transformers import (
     TrainingArguments,
     AutoModelForCausalLM
 )
-from datasets import load_dataset
+from datasets import load_dataset, DatasetDict
 
 # Оптимизация многопоточного использования CPU
 import multiprocessing
@@ -57,11 +57,15 @@ def main():
     model.to(device)
 
     dataset = load_dataset("json", data_files="/kaggle/input/datafortrainmodelkazbert/train_pretrain_with_labels.json")
+    
+    # Удаление дубликатов в 'masked_sentence'
     unique_sentences = set()
     dataset["train"] = dataset["train"].filter(lambda example: not (example["masked_sentence"] in unique_sentences or unique_sentences.add(example["masked_sentence"])))
-    train_size = int(0.5 * len(dataset["train"]))
-    dataset["train"] = dataset["train"].shuffle(seed=42).select(range(train_size))
-    logger.info(f"Размер нового датасета: {len(dataset['train'])}")
+    
+    # Разделение на обучающую и валидационную выборки (80% для тренировки, 20% для валидации)
+    dataset = dataset["train"].train_test_split(test_size=0.2, seed=42)
+    logger.info(f"Размер обучающего датасета: {len(dataset['train'])}")
+    logger.info(f"Размер валидационного датасета: {len(dataset['test'])}")
 
     def tokenize_function(examples):
         inputs = tokenizer(
@@ -69,7 +73,7 @@ def main():
             truncation=True, max_length=128, padding="max_length"
         )
         labels = tokenizer(
-            examples["masked_sentence"],  # labels должны соответствовать входу
+            examples["labels"],  # labels должны соответствовать оригинальным данным
             truncation=True, max_length=128, padding="max_length"
         )["input_ids"]
         inputs["labels"] = labels  # labels передаются правильно
@@ -93,7 +97,8 @@ def main():
         fp16=True,
         dataloader_num_workers=4,
         report_to="none",
-        evaluation_strategy="no",
+        evaluation_strategy="steps",  # Оценка после каждого шага
+        eval_steps=500,  # После каждых 500 шагов оценивать
         **({"local_rank": local_rank} if local_rank != -1 else {}),
     )
 
@@ -101,6 +106,7 @@ def main():
         model=model,
         args=training_args,
         train_dataset=tokenized_dataset["train"],
+        eval_dataset=tokenized_dataset["test"],  # Валидационный датасет
         tokenizer=tokenizer,
     )
 

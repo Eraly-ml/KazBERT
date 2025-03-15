@@ -47,7 +47,7 @@ def main():
         model.resize_token_embeddings(tokenizer_vocab_size)
 
     # Загружаем датасет
-    dataset = load_dataset("json", data_files="/kaggle/input/kaz-rus-eng-wiki/train_pretrain.json")
+    dataset = load_dataset("json", data_files="/kaggle/input/datafortrainmodelkazbert/train_pretrain_with_labels.json")
     dataset = dataset["train"].train_test_split(test_size=0.1)  # 90% train, 10% validation
     
     def tokenize_function(examples):

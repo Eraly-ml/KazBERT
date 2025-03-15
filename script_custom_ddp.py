@@ -58,7 +58,7 @@ def main():
     model.to(device)
 
     # Загружаем датасет
-    dataset = load_dataset("json", data_files="/kaggle/input/kaz-rus-eng-wiki/train_pretrain.json")
+    dataset = load_dataset("json", data_files="/kaggle/input/datafortrainmodelkazbert/train_pretrain_with_labels.json")
 
     def tokenize_function(examples):
         # Токенизируем "masked_sentence"

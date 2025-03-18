@@ -88,7 +88,8 @@ def main():
         weight_decay=0.01,
         fp16=True,
         logging_steps=100,
-        logging_dir="./logs"
+        logging_dir="./logs",
+        report_to=[]
     )
 
     trainer = Trainer(

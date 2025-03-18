@@ -21,7 +21,8 @@ from transformers import (
 tokenizer = None
 
 def tokenize_function(example):
-    tokens = tokenizer(example["masked_text"], truncation=True, max_length=128)
+    # Добавляем padding, чтобы все последовательности имели длину 128
+    tokens = tokenizer(example["masked_text"], truncation=True, padding="max_length", max_length=128)
     input_ids = tokens["input_ids"]
     labels = [-100] * len(input_ids)
     mask_token_id = tokenizer.mask_token_id
@@ -67,6 +68,7 @@ def main():
     # Загружаем токенизатор из кастомного датасета
     tokenizer = BertTokenizerFast.from_pretrained("/kaggle/input/kazbert-train-dataset")
     
+    # Применяем функцию токенизации с padding и truncation, чтобы все последовательности имели одинаковую длину
     tokenized_datasets = dataset.map(tokenize_function, batched=False)
 
     data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
@@ -89,7 +91,7 @@ def main():
         fp16=True,
         logging_steps=100,
         logging_dir="./logs",
-        report_to=[]
+        report_to=[]  # Отключение wandb и других систем логирования
     )
 
     trainer = Trainer(

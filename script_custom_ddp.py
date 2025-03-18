@@ -85,7 +85,7 @@ def main():
         logging_strategy="epoch",     # Логируем каждую эпоху
         per_device_train_batch_size=16,
         per_device_eval_batch_size=16,
-        num_train_epochs=3,
+        num_train_epochs=10,
         weight_decay=0.01,
         fp16=True,
         logging_dir="./logs",

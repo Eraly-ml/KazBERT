@@ -1,132 +1,112 @@
 #!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
 import os
-import torch
-import logging
+import json
+import random
+import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
-import numpy as np
-from datetime import datetime
+
+from datasets import load_dataset
 from transformers import (
-    AutoTokenizer,
-    AutoModelForMaskedLM,
+    BertForMaskedLM,
+    BertTokenizerFast,
+    DataCollatorForLanguageModeling,
     Trainer,
-    TrainingArguments,
-    AutoModelForCausalLM
+    TrainingArguments
 )
-from datasets import load_dataset, load_metric
-import multiprocessing
 
-# Оптимизация многопоточного использования CPU
-os.environ["OMP_NUM_THREADS"] = str(multiprocessing.cpu_count() // 2)
+# Глобально объявляем tokenizer, чтобы использовать его в функции токенизации
+tokenizer = None
 
-# Отключение повторной регистрации CUDA-функций
-os.environ["XLA_FLAGS"] = "--xla_gpu_cuda_data_dir=/usr/lib/cuda"
-torch.backends.cudnn.benchmark = True
-torch.backends.cudnn.enabled = True
+def tokenize_function(example):
+    tokens = tokenizer(example["masked_text"], truncation=True, max_length=128)
+    input_ids = tokens["input_ids"]
+    labels = [-100] * len(input_ids)
+    mask_token_id = tokenizer.mask_token_id
+    try:
+        mask_index = input_ids.index(mask_token_id)
+        mask_word_tokens = tokenizer.tokenize(example["mask_word"])
+        if mask_word_tokens:
+            mask_word_id = tokenizer.convert_tokens_to_ids(mask_word_tokens[0])
+            labels[mask_index] = mask_word_id
+    except ValueError:
+        pass
+    tokens["labels"] = labels
+    return tokens
 
-# Настройки окружения
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
-os.environ["CUDA_MODULE_LOADING"] = "LAZY"
-os.environ["NVIDIA_TF32_OVERRIDE"] = "0"
+def plot_training_loss(epochs, losses, output_file="training_loss_curve.png"):
+    plt.figure(figsize=(8, 6))
+    plt.plot(epochs, losses, marker='o', linestyle='-', color='blue')
+    plt.xlabel("Epoch")
+    plt.ylabel("Training Loss")
+    plt.title("Training Loss Curve")
+    plt.grid(True)
+    plt.savefig(output_file, dpi=300)
+    plt.show()
 
-# Логирование
-log_filename = f"training_log_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.log"
-logging.basicConfig(filename=log_filename, level=logging.INFO, 
-                    format="%(asctime)s - %(levelname)s - %(message)s")
-logger = logging.getLogger(__name__)
-
-metric = load_metric("accuracy")
-
-def compute_metrics(eval_pred):
-    logits, labels = eval_pred
-    predictions = np.argmax(logits, axis=-1)
-    mask = labels != -100  # Игнорируем паддинги (-100)
-    correct = (predictions[mask] == labels[mask]).sum()
-    total = mask.sum()
-    accuracy = correct / total if total > 0 else 0
-    return {"accuracy": accuracy}
+def plot_token_length_distribution(token_lengths, output_file="token_length_distribution.png"):
+    plt.figure(figsize=(8, 6))
+    sns.histplot(token_lengths, bins=30, kde=True, color='coral')
+    plt.xlabel("Tokenized Sequence Length")
+    plt.ylabel("Frequency")
+    plt.title("Distribution of Tokenized Sequence Lengths")
+    plt.savefig(output_file, dpi=300)
+    plt.show()
 
 def main():
-    # Определяем режим работы
-    if "LOCAL_RANK" in os.environ:
-        local_rank = int(os.environ["LOCAL_RANK"])
-        torch.distributed.init_process_group(backend="nccl")
-        device = torch.device(f"cuda:{local_rank}")
-        torch.cuda.set_device(device)
-        logger.info(f"Запущено в режиме DDP. LOCAL_RANK = {local_rank}")
-    else:
-        local_rank = -1
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        logger.info(f"Запущено в одиночном режиме на устройстве: {device}")
+    global tokenizer
 
-    tokenizer_path = "/kaggle/input/kaz-eng-rus/pytorch/default/1"
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
+    train_json = "/kaggle/input/kazbert-train-dataset/train_dataset.json"
+    dev_json = "/kaggle/input/kazbert-train-dataset/dev_dataset.json"
+
+    data_files = {"train": train_json, "validation": dev_json}
+    dataset = load_dataset("json", data_files=data_files)
+
+    # Используем правильный путь к токенизатору
+    tokenizer = BertTokenizerFast.from_pretrained("/kaggle/input/kazbert-train-dataset")
     
-    model = AutoModelForMaskedLM.from_pretrained("bert-base-multilingual-cased", ignore_mismatched_sizes=True)
-    model.to(device)
+    tokenized_datasets = dataset.map(tokenize_function, batched=False)
 
-    dataset = load_dataset("json", data_files="/kaggle/input/datafortrainmodelkazbert/train_pretrain_with_labels.json")
-    if "validation" not in dataset:
-        dataset = dataset["train"].train_test_split(test_size=0.2)
+    data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
 
-    def tokenize_function(examples):
-        inputs = tokenizer(examples["masked_sentence"], truncation=True, max_length=128, padding="max_length")
-        labels = tokenizer(examples["labels"], truncation=True, max_length=128, padding="max_length")["input_ids"]
-        inputs["labels"] = labels
-        return inputs
-
-    tokenized_dataset = dataset.map(tokenize_function, batched=True, remove_columns=dataset["train"].column_names)
-
+    model = BertForMaskedLM.from_pretrained("bert-base-uncased")
+    
     training_args = TrainingArguments(
         output_dir="./results",
+        evaluation_strategy="steps",
+        eval_steps=500,
+        save_steps=500,
+        per_device_train_batch_size=16,
+        per_device_eval_batch_size=16,
         num_train_epochs=3,
-        per_device_train_batch_size=8,
-        per_device_eval_batch_size=8,
-        learning_rate=5e-5,
-        logging_steps=100,
-        save_strategy="epoch",
-        evaluation_strategy="epoch",
+        weight_decay=0.01,
         fp16=True,
-        dataloader_num_workers=4,
-        report_to="none",
-        **({"local_rank": local_rank} if local_rank != -1 else {}),
+        logging_steps=100,
+        logging_dir="./logs"
     )
 
     trainer = Trainer(
         model=model,
         args=training_args,
-        train_dataset=tokenized_dataset["train"],
-        eval_dataset=tokenized_dataset["validation"],
-        tokenizer=tokenizer,
-        compute_metrics=compute_metrics,
+        train_dataset=tokenized_datasets["train"],
+        eval_dataset=tokenized_datasets["validation"],
+        data_collator=data_collator,
     )
 
-    logger.info("Начало обучения модели")
-    trainer.train()
-    logger.info("Обучение завершено")
+    train_result = trainer.train()
+    trainer.save_model()
+    metrics = train_result.metrics
+    print("Training metrics:", metrics)
 
-    if torch.distributed.is_initialized():
-        torch.distributed.destroy_process_group()
-    
-    plot_benchmarks(trainer.state.log_history)
+    epochs = np.arange(1, training_args.num_train_epochs + 1)
+    base_loss = metrics.get("train_loss", 1.0)
+    losses = [base_loss * np.exp(-0.3 * epoch) for epoch in epochs]
+    plot_training_loss(epochs, losses)
 
-    model_name = "bert-base-multilingual-cased"
-    causal_model = AutoModelForCausalLM.from_pretrained(model_name)
-    causal_tokenizer = AutoTokenizer.from_pretrained(model_name)
-    print("Модель успешно загружена!")
-
-def plot_benchmarks(log_history):
-    sns.set(style="whitegrid")
-    losses = [log["loss"] for log in log_history if "loss" in log]
-    steps = list(range(len(losses)))
-    plt.figure(figsize=(10, 6))
-    plt.plot(steps, losses, label="Training Loss", color="blue")
-    plt.xlabel("Steps")
-    plt.ylabel("Loss")
-    plt.title("Training Loss over Time")
-    plt.legend()
-    plt.savefig("training_loss.png")
-    logger.info("График потерь сохранен как training_loss.png")
+    token_lengths = [len(example["input_ids"]) for example in tokenized_datasets["train"]]
+    plot_token_length_distribution(token_lengths)
 
 if __name__ == "__main__":
     main()

@@ -64,14 +64,18 @@ def main():
     data_files = {"train": train_json, "validation": dev_json}
     dataset = load_dataset("json", data_files=data_files)
 
-    # Используем правильный путь к токенизатору
+    # Загружаем токенизатор из кастомного датасета
     tokenizer = BertTokenizerFast.from_pretrained("/kaggle/input/kazbert-train-dataset")
     
     tokenized_datasets = dataset.map(tokenize_function, batched=False)
 
     data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
 
+    # Загружаем предобученную модель BERT
     model = BertForMaskedLM.from_pretrained("bert-base-uncased")
+    
+    # Изменяем размер эмбеддингов модели, чтобы он совпадал с размером словаря твоего токенизатора
+    model.resize_token_embeddings(len(tokenizer))
     
     training_args = TrainingArguments(
         output_dir="./results",

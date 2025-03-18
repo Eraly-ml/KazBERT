@@ -57,8 +57,8 @@ class EpochEvaluationCallback(TrainerCallback):
 def main():
     global tokenizer
 
-    train_txt = "/kaggle/working/train.txt"
-    dev_txt = "/kaggle/working/dev.txt"
+    train_txt = "/kaggle/input/datasetkazbert/train (1).txt"
+    dev_txt = "/kaggle/input/datasetkazbert/dev.txt"
 
     # Загружаем датасет из текстовых файлов
     dataset = load_dataset("text", data_files={"train": train_txt, "validation": dev_txt})

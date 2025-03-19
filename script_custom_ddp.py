@@ -34,8 +34,18 @@ def plot_training_loss(epochs, losses, output_file="training_loss_curve.png"):
     plt.savefig(output_file, dpi=300)
     plt.show()
 
+class SaveEveryNEpochsCallback(TrainerCallback):
+    """Кастомный коллбэк для сохранения модели каждые N эпох."""
+    def __init__(self, save_every=5):
+        self.save_every = save_every
+
+    def on_epoch_end(self, args, state, control, **kwargs):
+        if state.epoch % self.save_every == 0:
+            print(f"Saving model at epoch {state.epoch}...")
+            control.should_save = True
+
 class EpochEvaluationCallback(TrainerCallback):
-    """Кастомный коллбек для логирования валидационного лосса после каждой эпохи."""
+    """Кастомный коллбэк для логирования валидационного лосса после каждой эпохи."""
     def __init__(self):
         self.epoch_losses = []
 
@@ -70,7 +80,7 @@ def main():
     tokenized_datasets = dataset.map(tokenize_function, batched=True, remove_columns=["text"])
 
     # Data collator с динамическим MLM (маскирование во время обучения)
-    data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=True, mlm_probability=0.15)
+    data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=True, mlm_probability=0.20)
 
     # Загружаем предобученную модель BERT
     model = BertForMaskedLM.from_pretrained("bert-base-uncased")
@@ -81,11 +91,11 @@ def main():
     training_args = TrainingArguments(
         output_dir="./results",
         evaluation_strategy="epoch",  # Оцениваем каждую эпоху
-        save_strategy="epoch",        # Сохраняем модель каждую эпоху
+        save_strategy="no",           # Отключаем автоматическое сохранение
         logging_strategy="epoch",     # Логируем каждую эпоху
         per_device_train_batch_size=16,
         per_device_eval_batch_size=16,
-        num_train_epochs=10,
+        num_train_epochs=20,
         weight_decay=0.01,
         fp16=True,
         logging_dir="./logs",
@@ -98,7 +108,10 @@ def main():
         train_dataset=tokenized_datasets["train"],
         eval_dataset=tokenized_datasets["validation"],
         data_collator=data_collator,
-        callbacks=[EpochEvaluationCallback()]
+        callbacks=[
+            EpochEvaluationCallback(),
+            SaveEveryNEpochsCallback(save_every=5)  # Добавлен кастомный коллбэк для сохранения
+        ]
     )
 
     train_result = trainer.train()

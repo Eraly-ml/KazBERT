@@ -16,8 +16,9 @@ from transformers import (
     TrainerCallback
 )
 
-# Глобально объявляем tokenizer, чтобы использовать его в функции токенизации
-tokenizer = None
+# Загружаем кастомный токенизатор
+TOKENIZER_PATH = "/kaggle/input/kazbert/pytorch/2/1"
+tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_PATH)
 
 def tokenize_function(example):
     """Функция токенизации текста."""
@@ -65,55 +66,40 @@ class EpochEvaluationCallback(TrainerCallback):
         return control
 
 def main():
-    global tokenizer
-
-    # Пути к файлам. Если файл валидации отсутствует, разделим train на train/validation.
-    train_txt = "/kaggle/input/datasetkazbert/train (1).txt"
-    dev_txt = "/kaggle/input/datasetkazbert/dev.txt"  # можно оставить пустым, если нет
+    # Пути к файлам
+    train_txt = "/kaggle/input/kazbert-nlp-txt-data/merged_dataset.txt"
+    dev_txt = ""
 
     data_files = {"train": train_txt}
     if os.path.exists(dev_txt):
         data_files["validation"] = dev_txt
 
-    # Загружаем датасет из текстовых файлов
     dataset = load_dataset("text", data_files=data_files)
-
-    # Если в датасете нет ключа "validation", выполняем разбиение обучающей выборки
     if "validation" not in dataset:
-        print("Разбиваем данные: 90% train и 10% validation")
         split_dataset = dataset["train"].train_test_split(test_size=0.1)
         dataset = {"train": split_dataset["train"], "validation": split_dataset["test"]}
 
-    # Используем ModernBERT: заменяем BertTokenizerFast и BertForMaskedLM на AutoTokenizer и AutoModelForMaskedLM
-    checkpoint = "modernbert-base-uncased"  # замените на актуальный чекпойнт ModernBERT
-    tokenizer = AutoTokenizer.from_pretrained(checkpoint)
-    
-    # Токенизация датасета
     tokenized_datasets = {}
     for split in dataset.keys():
         tokenized_datasets[split] = dataset[split].map(tokenize_function, batched=True, remove_columns=["text"])
 
-    # Data collator с динамическим MLM (маскирование во время обучения)
-    data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=True, mlm_probability=0.20)
+    data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=True, mlm_probability=0.15)
 
-    # Загружаем предобученную модель ModernBERT
-    model = AutoModelForMaskedLM.from_pretrained(checkpoint)
-    
-    # Меняем размер эмбеддингов, чтобы он совпадал с размером словаря кастомного токенизатора
+    model = AutoModelForMaskedLM.from_pretrained("bert-base-uncased")
     model.resize_token_embeddings(len(tokenizer))
     
     training_args = TrainingArguments(
         output_dir="./results",
-        evaluation_strategy="epoch",  # Оцениваем каждую эпоху
-        save_strategy="no",           # Отключаем автоматическое сохранение
-        logging_strategy="epoch",     # Логируем каждую эпоху
+        evaluation_strategy="epoch",
+        save_strategy="no",
+        logging_strategy="epoch",
         per_device_train_batch_size=16,
         per_device_eval_batch_size=16,
         num_train_epochs=20,
         weight_decay=0.01,
         fp16=True,
         logging_dir="./logs",
-        report_to=[]  # Отключаем wandb и другие системы логирования
+        report_to=[]
     )
 
     trainer = Trainer(
@@ -133,7 +119,6 @@ def main():
     metrics = train_result.metrics
     print("Training metrics:", metrics)
 
-    # Построение графика обучения (примерный вариант)
     epochs = np.arange(1, training_args.num_train_epochs + 1)
     base_loss = metrics.get("train_loss", 1.0)
     losses = [base_loss * np.exp(-0.3 * epoch) for epoch in epochs]
